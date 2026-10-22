@@ -12,7 +12,50 @@ app.use(cors());
 app.use(express.json({ limit: "200kb" }));
 
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
-const GROQ_MODEL = "llama-3.3-70b-versatile";
+// Groq retires models often, so we ask Groq what is available and use the best match.
+// You can force one by setting GROQ_MODEL in Render's environment variables.
+const GROQ_MODELS_URL = "https://api.groq.com/openai/v1/models";
+const PREFERRED_MODELS = ["openai/gpt-oss-120b", "llama-3.3-70b-versatile", "openai/gpt-oss-20b", "llama-3.1-8b-instant"];
+let modelCache = { list: null, at: 0 };
+
+async function getCandidateModels(key) {
+  if (process.env.GROQ_MODEL) return [process.env.GROQ_MODEL];
+  if (modelCache.list && Date.now() - modelCache.at < 60 * 60 * 1000) return modelCache.list;
+  try {
+    const r = await fetch(GROQ_MODELS_URL, {
+      headers: { Authorization: `Bearer ${key}` },
+      signal: AbortSignal.timeout(8000)
+    });
+    if (r.ok) {
+      const data = await r.json();
+      const ids = ((data && data.data) || []).map((m) => m.id);
+      const available = PREFERRED_MODELS.filter((id) => ids.includes(id));
+      if (available.length) {
+        modelCache = { list: available, at: Date.now() };
+        return available;
+      }
+    }
+  } catch (e) {
+    // fall through to the static list
+  }
+  return PREFERRED_MODELS;
+}
+
+function callGroq(key, model, messages) {
+  const body = {
+    model,
+    max_tokens: 2000, // reasoning models spend some of this thinking before they answer
+    response_format: { type: "json_object" },
+    messages
+  };
+  if (model.startsWith("openai/gpt-oss")) body.reasoning_effort = "low";
+  return fetch(GROQ_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+    signal: AbortSignal.timeout(25000),
+    body: JSON.stringify(body)
+  });
+}
 const FIRECRAWL_URL = "https://api.firecrawl.dev/v2/search";
 const SHARED_KEY = process.env.GROQ_API_KEY;
 // Optional: a free Firecrawl account key gives the server its own search allowance
@@ -90,20 +133,17 @@ app.post("/verify", limiter, async (req, res) => {
     : "(NO SEARCH RESULTS WERE FOUND. You cannot verify anything. Use verdict \"uncertain\" unless the passage is purely opinion.)";
 
   try {
-    const resp = await fetch(GROQ_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
-      signal: AbortSignal.timeout(25000),
-      body: JSON.stringify({
-        model: GROQ_MODEL,
-        max_tokens: 800,
-        response_format: { type: "json_object" },
-        messages: [
-          { role: "system", content: SYSTEM_PROMPT },
-          { role: "user", content: `Passage to fact-check:\n"""${text}"""\n\nWeb search results:\n${context}` }
-        ]
-      })
-    });
+    const messages = [
+      { role: "system", content: SYSTEM_PROMPT },
+      { role: "user", content: `Passage to fact-check:\n"""${text}"""\n\nWeb search results:\n${context}` }
+    ];
+    const candidates = await getCandidateModels(key);
+    let resp = null;
+    for (const model of candidates) {
+      resp = await callGroq(key, model, messages);
+      if (resp.status !== 404) break; // 404 = this model no longer exists, try the next one
+      modelCache = { list: null, at: 0 };
+    }
 
     if (resp.status === 429) {
       return res.status(429).json({ error: usingOwn ? "OWN_KEY_RATE_LIMITED" : "SHARED_LIMIT_REACHED" });
