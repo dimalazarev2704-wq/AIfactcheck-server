@@ -103,11 +103,18 @@ async function requireAuth(req, res, next) {
 }
 
 // ---------- rate limits ----------
+// Behind Render's edge, req.ip can be a shared proxy address, which would lump many
+// people into one limit. The edge passes the real visitor address in this header.
+function clientIp(req) {
+  return (req.get("cf-connecting-ip") || req.ip || "unknown").trim();
+}
+
 const signupLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
-  limit: 5,
+  limit: 10,
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: clientIp,
   message: { error: "RATE_LIMITED", detail: "Too many new accounts from this network. Try again in an hour." }
 });
 const loginLimiter = rateLimit({
@@ -115,6 +122,8 @@ const loginLimiter = rateLimit({
   limit: 20,
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: clientIp,
+  skipSuccessfulRequests: true, // only wrong passwords count against the limit
   message: { error: "RATE_LIMITED", detail: "Too many sign-in attempts. Try again in a few minutes." }
 });
 // Per person (not per network), so a family on one Wi-Fi doesn't share a limit.
@@ -350,8 +359,20 @@ app.post("/verify", needAccounts, requireAuth, verifyLimiter, async (req, res) =
     }
     return res.json({ result: parsed, usage });
   } catch (e) {
-    return res.status(500).json({ error: "NETWORK_ERROR", detail: String(e) });
+    console.error("Check failed:", e && e.message);
+    const timedOut = e && (e.name === "TimeoutError" || e.name === "AbortError");
+    return res.status(500).json({
+      error: "NETWORK_ERROR",
+      detail: timedOut ? "The check took too long. Try again." : "Something went wrong while checking. Try again."
+    });
   }
+});
+
+// Bad or oversized requests get a short JSON answer, never a stack trace.
+app.use((err, req, res, next) => {
+  if (res.headersSent) return next(err);
+  const tooBig = err && err.type === "entity.too.large";
+  return res.status(tooBig ? 413 : 400).json({ error: "BAD_REQUEST", detail: tooBig ? "That text is too long." : "Bad request." });
 });
 
 const PORT = process.env.PORT || 3000;
