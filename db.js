@@ -1,11 +1,25 @@
 // db.js: tiny data layer for accounts and daily usage (Postgres, e.g. Neon's free plan).
 const { Pool } = require("pg");
 
+// Neon's copied connection string ends with ?sslmode=require&channel_binding=require.
+// We turn on encryption ourselves below and drop those two extras, which can make
+// the connection fail with some Node versions.
+function cleanConnectionString(url) {
+  try {
+    const u = new URL(url);
+    u.searchParams.delete("channel_binding");
+    u.searchParams.delete("sslmode");
+    return u.toString();
+  } catch (e) {
+    return url;
+  }
+}
+
 let pool = null;
 function getPool() {
   if (!pool) {
     pool = new Pool({
-      connectionString: process.env.DATABASE_URL,
+      connectionString: cleanConnectionString(process.env.DATABASE_URL),
       ssl: { rejectUnauthorized: false },
       max: 5,
       idleTimeoutMillis: 30000
@@ -76,4 +90,4 @@ async function addUsage(userId, tokens) {
   );
 }
 
-module.exports = { init, createUser, getUserByEmail, getUserById, getUsageToday, addUsage };
+module.exports = { cleanConnectionString, init, createUser, getUserByEmail, getUserById, getUsageToday, addUsage };
