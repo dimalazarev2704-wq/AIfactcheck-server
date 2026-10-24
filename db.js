@@ -85,6 +85,11 @@ async function getUserByEmail(email) {
   return r.rows[0] || null;
 }
 
+// Removes the account; the person's usage rows go with it (ON DELETE CASCADE).
+async function deleteUser(id) {
+  await getPool().query("DELETE FROM users WHERE id = $1", [id]);
+}
+
 async function getUserById(id) {
   const r = await q("SELECT id, email FROM users WHERE id = $1", [id]);
   return r.rows[0] || null;
@@ -109,4 +114,4 @@ async function addUsage(userId, tokens) {
   );
 }
 
-module.exports = { cleanConnectionString, init, createUser, getUserByEmail, getUserById, getUsageToday, addUsage };
+module.exports = { cleanConnectionString, init, createUser, getUserByEmail, getUserById, deleteUser, getUsageToday, addUsage };
